@@ -2,9 +2,23 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"testing"
 )
+
+func newStore() *Store {
+	opts := StoreOpts{
+		PathTransformFunc: CASPathTransformFunc,
+	}
+	return NewStore(opts)
+}
+
+func teardown(t *testing.T, s *Store) {
+	if err := s.Clear(); err != nil {
+		t.Error(err)
+	}
+}
 
 func TestPathTransformFunc(t *testing.T) {
 	key := "myjourney"
@@ -22,25 +36,36 @@ func TestPathTransformFunc(t *testing.T) {
 }
 
 func TestStore(t *testing.T) {
-	opts := StoreOpts{
-		PathTransformFunc: CASPathTransformFunc,
-	}
-	s := NewStore(opts)
-	data := []byte("some random bytes")
-	if err := s.writeStream("randombytes", bytes.NewReader(data)); err != nil {
-		t.Error(err)
-	}
-	r, err := s.Read("randombytes")
-	if err != nil {
-		t.Error(err)
-	}
-	b, _ := io.ReadAll(r)
+	s := newStore()
+	defer teardown(t, s)
 
-	if string(b) != string(data) {
-		t.Errorf("want %s have %s", data, b)
-	}
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("file_%d", i)
 
-	if err := s.Delete("randombytes"); err != nil {
-		t.Error(err)
+		data := []byte("some random bytes")
+		if err := s.writeStream(key, bytes.NewReader(data)); err != nil {
+			t.Error(err)
+		}
+
+		if ok := s.Has(key); !ok {
+			t.Errorf("Got: key %s is not present. Expected: Key %s is present ", key, key)
+		}
+
+		r, err := s.Read("randombytes")
+		if err != nil {
+			t.Error(err)
+		}
+		b, _ := io.ReadAll(r)
+
+		if string(b) != string(data) {
+			t.Errorf("want %s have %s", data, b)
+		}
+
+		if err := s.Delete(key); err != nil {
+			t.Error(err)
+		}
+		if ok := s.Has(key); ok {
+			t.Errorf("Got: key %s is present. Expected: Key %s not present ", key, key)
+		}
 	}
 }

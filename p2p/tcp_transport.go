@@ -22,6 +22,10 @@ func NewTCPPeer(conn net.Conn, outbound bool) *TCPPeer {
 	}
 }
 
+func (p *TCPPeer) RemoteAddress() net.Addr {
+	return p.conn.RemoteAddr()
+}
+
 func (p *TCPPeer) Close() error {
 	return p.conn.Close()
 }
@@ -74,9 +78,10 @@ func (t *TCPTransport) startAcceptLoop() {
 		}
 
 		if err != nil {
-			fmt.Printf("TCP accept error: %s\n", err)
+			log.Printf("TCP accept error: %s\n", err)
 		}
 
+		log.Printf("new incoming connection %+v for address %v\n", conn, t.ListenAddress)
 		go t.handleConn(conn, false)
 	}
 }
@@ -106,10 +111,6 @@ func (t *TCPTransport) handleConn(conn net.Conn, outbound bool) {
 	//buf := make([]byte, 2000)
 	for {
 		err = t.Decoder.Decode(conn, &rpc)
-		// fmt.Printf("Error Type: %+v", reflect.TypeOf(err))
-		// if err == &net.OpError {
-		// 	return
-		// }
 		if err != nil {
 			log.Printf("TCP read error: %s\n", err)
 			continue
@@ -121,4 +122,17 @@ func (t *TCPTransport) handleConn(conn net.Conn, outbound bool) {
 		fmt.Printf("message: %+v\n", string(rpc.Payload))
 
 	}
+}
+
+func (t *TCPTransport) Close() error {
+	return t.listener.Close()
+}
+
+func (t *TCPTransport) Dial(address string) error {
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return err
+	}
+	go t.handleConn(conn, true)
+	return nil
 }
