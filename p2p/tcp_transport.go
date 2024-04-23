@@ -5,33 +5,40 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 )
 
-// TCPPeer represents the remote node over a TCP established connection
+// TCPPeer represents the remote node over a TCP established connection.
 type TCPPeer struct {
-	conn net.Conn
+	// The underlying connection of the peer. Which in this case
+	// is a TCP connection.
+	net.Conn
 	// if we dial and retrieve a conn => outbound == true
 	// if we accept and retrieve a conn => outbound == false
 	outbound bool
+
+	wg *sync.WaitGroup
 }
 
 func NewTCPPeer(conn net.Conn, outbound bool) *TCPPeer {
 	return &TCPPeer{
-		conn:     conn,
+		Conn:     conn,
 		outbound: outbound,
+		wg:       &sync.WaitGroup{},
 	}
 }
 
-func (p *TCPPeer) RemoteAddress() net.Addr {
-	return p.conn.RemoteAddr()
+func (p *TCPPeer) CloseStream() {
+	p.wg.Done()
 }
 
-func (p *TCPPeer) Close() error {
-	return p.conn.Close()
+func (p *TCPPeer) Send(b []byte) error {
+	_, err := p.Conn.Write(b)
+	return err
 }
 
 type TCPTransportOpts struct {
-	ListenAddress string
+	ListenAddr    string
 	HandshakeFunc HandshakeFunc
 	Decoder       Decoder
 	OnPeer        func(Peer) error
@@ -46,26 +53,50 @@ type TCPTransport struct {
 func NewTCPTransport(opts TCPTransportOpts) *TCPTransport {
 	return &TCPTransport{
 		TCPTransportOpts: opts,
-		rpcch:            make(chan RPC),
+		rpcch:            make(chan RPC, 1024),
 	}
 }
 
-// Consume implements the Transport interface, which will return read-only channel
+// Addr implements the Transport interface return the address
+// the transport is accepting connections.
+func (t *TCPTransport) Addr() string {
+	return t.ListenAddr
+}
+
+// Consume implements the Tranport interface, which will return read-only channel
 // for reading the incoming messages received from another peer in the network.
 func (t *TCPTransport) Consume() <-chan RPC {
 	return t.rpcch
 }
 
-func (t *TCPTransport) ListenAndAccept() error {
-	var err error
+// Close implements the Transport interface.
+func (t *TCPTransport) Close() error {
+	return t.listener.Close()
+}
 
-	t.listener, err = net.Listen("tcp", t.ListenAddress)
+// Dial implements the Transport interface.
+func (t *TCPTransport) Dial(addr string) error {
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("TCP transport listening on port: %s\n", t.ListenAddress)
+	go t.handleConn(conn, true)
+
+	return nil
+}
+
+func (t *TCPTransport) ListenAndAccept() error {
+	var err error
+
+	t.listener, err = net.Listen("tcp", t.ListenAddr)
+	if err != nil {
+		return err
+	}
+
 	go t.startAcceptLoop()
+
+	log.Printf("TCP transport listening on port: %s\n", t.ListenAddr)
 
 	return nil
 }
@@ -78,10 +109,9 @@ func (t *TCPTransport) startAcceptLoop() {
 		}
 
 		if err != nil {
-			log.Printf("TCP accept error: %s\n", err)
+			fmt.Printf("TCP accept error: %s\n", err)
 		}
 
-		log.Printf("new incoming connection %+v for address %v\n", conn, t.ListenAddress)
 		go t.handleConn(conn, false)
 	}
 }
@@ -90,13 +120,13 @@ func (t *TCPTransport) handleConn(conn net.Conn, outbound bool) {
 	var err error
 
 	defer func() {
-		log.Printf("dropping peer connection: %s", err)
+		fmt.Printf("dropping peer connection: %s", err)
 		conn.Close()
 	}()
 
 	peer := NewTCPPeer(conn, outbound)
 
-	if err := t.HandshakeFunc(peer); err != nil {
+	if err = t.HandshakeFunc(peer); err != nil {
 		return
 	}
 
@@ -107,32 +137,23 @@ func (t *TCPTransport) handleConn(conn net.Conn, outbound bool) {
 	}
 
 	// Read loop
-	rpc := RPC{}
-	//buf := make([]byte, 2000)
 	for {
+		rpc := RPC{}
 		err = t.Decoder.Decode(conn, &rpc)
 		if err != nil {
-			log.Printf("TCP read error: %s\n", err)
+			return
+		}
+
+		rpc.From = conn.RemoteAddr().String()
+
+		if rpc.Stream {
+			peer.wg.Add(1)
+			fmt.Printf("[%s] incoming stream, waiting...\n", conn.RemoteAddr())
+			peer.wg.Wait()
+			fmt.Printf("[%s] stream closed, resuming read loop\n", conn.RemoteAddr())
 			continue
 		}
 
-		rpc.From = conn.RemoteAddr()
 		t.rpcch <- rpc
-
-		fmt.Printf("message: %+v\n", string(rpc.Payload))
-
 	}
-}
-
-func (t *TCPTransport) Close() error {
-	return t.listener.Close()
-}
-
-func (t *TCPTransport) Dial(address string) error {
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		return err
-	}
-	go t.handleConn(conn, true)
-	return nil
 }
